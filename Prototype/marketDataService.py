@@ -1,200 +1,159 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Jun 20 10:12:21 2020
-
-@author: hongsong chou
-"""
-
-import time
-import random
 import os
-from common.OrderBookSnapshot_FiveLevels import OrderBookSnapshot_FiveLevels
-import pandas as pd
+import time
 from multiprocessing import Process, Queue
 
+import pandas as pd
+
+from common.OrderBookSnapshot_FiveLevels import OrderBookSnapshot_FiveLevels
+
+FILTER_BEFORE_9 = True
+
+INIT_TS = 1711962000
+if not FILTER_BEFORE_9:
+    INIT_TS -= 800
 
 
-# helper function to convert time format
-def convert_time_format(time_value):    
-    time_str = str(time_value).zfill(9)
-    hours = int(time_str[:2])
-    minutes = int(time_str[2:4])
-    seconds = int(time_str[4:6])
-    milliseconds = int(time_str[6:])
-    
-    return pd.Timestamp(year=2024, month=4, day=1, hour=hours, minute=minutes, second=seconds, microsecond=milliseconds * 1000)
+class SubscriptionManager:
+    def __init__(self, futures=None, stocks=None):
+        if futures is None:
+            futures = []
+        if stocks is None:
+            stocks = []
+        self.futures = futures
+        self.stocks = stocks
+        self.queues = {
+            'futures': {instrument: Queue() for instrument in futures},
+            'stock': {instrument: Queue() for instrument in stocks}
+        }
+
+    def get_queue(self, category, instrument):
+        return self.queues.get(category, {}).get(instrument)
 
 
 class MarketDataService:
+    def __init__(self, market_data_subscription_manager: SubscriptionManager, chunksize=1000):
+        print(f"[{os.getpid()}] <<<<< call MarketDataService.init")
+        self._data_path = '.\processedData_2024'
+        self._support_instruments = self._get_instruments()
+        self._months = ["202404", "202405", "202406"]
+        self._chunksize = chunksize
+        self._start_time = time.time()
 
-    def __init__(self, marketData_2_exchSim_q, marketData_2_platform_q):
-        print("[%d]<<<<< call MarketDataService.init" % (os.getpid(),))
-        # time.sleep(3)
-        # self.produce_market_data(marketData_2_exchSim_q, marketData_2_platform_q)
+        self.subscription_manager = market_data_subscription_manager
+        # self.produce_single_inst_market_data('futures', 'HSF1')
 
-        self.marketData_2_exchSim_q = marketData_2_exchSim_q
-        self.marketData_2_platform_q = marketData_2_platform_q
+        # Validate if all subscribed instruments are supported
+        for stock in self.subscription_manager.stocks:
+            if stock not in self._support_instruments['stocks']:
+                raise ValueError(f"No data for stock {stock}")
+        for futures in self.subscription_manager.futures:
+            if futures not in self._support_instruments['futures']:
+                raise ValueError(f"No data for futures {futures}")
 
-        self.get_market_data_with_delay(
-            stock_id="0050",
-            start_on_date="202406"
-        )
+        self.produce_multi_insts_market_data()
 
-    # Function to generate market data from .csv.gz files
-    def market_data_generator(self,stock_id=None,start_on_date=None):
-        dataFolder = 'processedData_2024/stocks'
+    def _get_instruments(self):
+        # Get the list of supported instruments from the data directory
+        futures_instruments = list(
+            set([f.split('_')[0] for f in os.listdir(os.path.join(self._data_path, 'futuresQuotes')) if
+                 f.endswith('.csv.gz')]))
+        stocks_instruments = list(set([f.split('_')[0] for f in os.listdir(os.path.join(self._data_path, 'stocks')) if
+                                       f.endswith('.csv.gz')]))
+        return {'futures': futures_instruments, 'stocks': stocks_instruments}
 
-        # Get all .csv.gz files in the data folder according to filters defined
-        files = []
+    @staticmethod
+    def _convert_time(time_int):
+        hour = time_int // 1e7
+        minute = (time_int % 1e7) // 1e5
+        second = (time_int % 1e5) // 1e3
+        microsecond = time_int % 1e3 * 1e3
+        return pd.Timedelta(hours=hour, minutes=minute, seconds=second, microseconds=microsecond)
 
-        # first get all files
-        for file in os.listdir(dataFolder):
-            if file.endswith('.csv.gz'):
-                files.append(file)
+    @staticmethod
+    def _wait_until(timestamp):
+        while True:
+            now = time.time()
+            if now >= timestamp:
+                break
+            sleep_time = timestamp - now
+            if sleep_time > 0.1:
+                time.sleep(sleep_time - 0.1)
+            else:
+                pass
 
-        # if stock_id is provided, filter the files
-        if stock_id:
-            files = [file for file in files if stock_id in file]
+    def _process_chunk(self, chunk, filter_before_9):
+        if filter_before_9:
+            chunk = chunk[chunk['time'] >= 9e7]
+        if chunk.empty:
+            return chunk
+        chunk = chunk.copy()
+        chunk.loc[:, 'time'] = chunk['date'] + chunk['time'].apply(self._convert_time)
+        chunk.rename(columns=lambda x: x.replace('BP', 'bidPrice').replace('BV', 'bidSize')
+                     .replace('SP', 'askPrice').replace('SV', 'askSize'), inplace=True)
+        chunk = chunk.iloc[1:] if not chunk.empty else chunk
+        return chunk
 
-        # if start_on_date is provided, filter the files
-        if start_on_date:
-            date_filter_files = []
-            for file in files:
-                # get the date from the file name : e.g. 6443_md_202404_202404.csv.gz (FILTER BEFORE BETWEEN _ and .csv.gz)
-                date = int(file.split('_')[2])
-                if date >= int(start_on_date):
-                    date_filter_files.append(file)
+    def read_data_by_chunk(self, category, instrument, month, chunksize=5000):
+        """
+        Read data in chunks and process each chunk
+        """
+        file_name = f"{instrument}_md_{month}_{month}.csv.gz"
+        file_path = os.path.join(self._data_path, 'futuresQuotes' if category == 'futures' else 'stocks', file_name)
+        first_chunk_flg = True
+        chunks = pd.read_csv(file_path, compression='gzip', parse_dates=['date'], chunksize=chunksize)
 
-            files = date_filter_files
-                
-        # sort the files
-        files.sort()
-        print("SORTED ORDER OF FILES: ", files)
+        for chunk in chunks:
+            chunk = self._process_chunk(chunk, FILTER_BEFORE_9)
 
-        # List to hold all DataFrames
-        all_data = []
-        
-        # Iterate through all files
-        for file in files:
-            # Read the data
-            data = pd.read_csv(
-                os.path.join(dataFolder, file),
-                compression='gzip',
-                index_col=0,
-                parse_dates=True
-            )
+            while chunk.empty:
+                try:
+                    chunk = next(chunks)
+                    chunk = self._process_chunk(chunk, FILTER_BEFORE_9)
+                except StopIteration:
+                    return
 
-            data['datetime'] = data['time'].apply(convert_time_format)
-            
-            # Calculate differences between consecutive times
-            data['time_diff'] = data['datetime'].diff()
-            
-            
-            # Append DataFrame to the list
-            all_data.append(data)
+            yield first_chunk_flg, chunk
+            first_chunk_flg = False
 
-        # Concatenate all DataFrames row by row
-        combined_data = pd.concat(all_data, ignore_index=True)
-        
-        return combined_data
+    def produce_single_inst_market_data(self, category, instrument):
+        print(f"[{os.getpid()}] <<<<< Starting processing for instrument: {instrument}")
+        for month in self._months:
+            for first_chunk_flg, chunk in self.read_data_by_chunk(category, instrument, month, self._chunksize):
+                print(f"[{os.getpid()}] <<<<< Processing chunk for instrument: {instrument}, month: {month}")
+                if first_chunk_flg:
+                    self._wait_until(self._start_time + 10)
+                for i, row in chunk.iterrows():
+                    bidPrice = [row[f'bidPrice{i}'] for i in range(1, 6)]
+                    askPrice = [row[f'askPrice{i}'] for i in range(1, 6)]
+                    bidSize = [row[f'bidSize{i}'] for i in range(1, 6)]
+                    askSize = [row[f'askSize{i}'] for i in range(1, 6)]
+                    ts = row['time'].timestamp()
 
-    # Function to get and print the data row by row with a delay
-    def get_market_data_with_delay(self,stock_id=None,start_on_date=None):
-        combined_data = self.market_data_generator(
-            stock_id=stock_id,
-            start_on_date=start_on_date
-        )
-        first_val = True
-        for index, row in combined_data.iterrows():
+                    self._wait_until(self._start_time + 10 + ts - INIT_TS)
+                    print('Put quote:', instrument, row['time'])
+                    self.subscription_manager.get_queue(category, instrument).put(
+                        OrderBookSnapshot_FiveLevels(instrument, row['date'], row['time'], bidPrice, askPrice, bidSize,
+                                                     askSize))
 
-            bidPrice, askPrice, bidSize, askSize = [], [], [], []
-
-            # Row object has following structure , use that to fill the above lists
-            # date                         2024-04-01
-            # time                           90049771
-            # lastPx                          15815.0
-            # size                              165.0
-            # volume                                0
-            # SP5                             15845.0
-            # SP4                             15840.0
-            # SP3                             15830.0
-            # SP2                             15825.0
-            # SP1                             15820.0
-            # BP1                             15815.0
-            # BP2                             15805.0
-            # BP3                             15800.0
-            # BP4                             15795.0
-            # BP5                             15790.0
-            # SV5                                   1
-            # SV4                                  31
-            # SV3                                   1
-            # SV2                                   2
-            # SV1                                  37
-            # BV1                                 244
-            # BV2                                 186
-            # BV3                                 155
-            # BV4                                 152
-            # BV5                                  83
-            # datetime     2024-04-01 09:00:49.771000
-            # time_diff        0 days 00:00:05.014000
-
-            bidPrice = [row['BP5'], row['BP4'], row['BP3'], row['BP2'], row['BP1']]
-            askPrice = [row['SP1'], row['SP2'], row['SP3'], row['SP4'], row['SP5']]
-            bidSize = [row['BV5'], row['BV4'], row['BV3'], row['BV2'], row['BV1']]
-            askSize = [row['SV1'], row['SV2'], row['SV3'], row['SV4'], row['SV5']]
-            quoteSnapshot = OrderBookSnapshot_FiveLevels(stock_id, row['date'], row['datetime'], 
-                                                     bidPrice, askPrice, bidSize, askSize)
-
-
-            print('[%d]MarketDataService>>>produce_quote' % (os.getpid()))
-
-            # Put the data in the queue
-            self.marketData_2_exchSim_q.put(quoteSnapshot)
-            self.marketData_2_platform_q.put(quoteSnapshot)
-
-            # save to logs called market_data_output.txt
-            with open('market_data_output.txt', 'a') as f:
-                # Increase the display width to show more columns
-                pd.set_option('display.max_columns', 100)
-                f.write(quoteSnapshot.outputAsDataFrame().to_string(index=False) + '\n')
-
-            # no delay for the first row
-            if first_val:
-                first_val = False
-                continue 
-                
-            time.sleep(row['time_diff'].total_seconds())  # Wait for the specified delay
+    def produce_multi_insts_market_data(self):
+        """
+        Create and start subprocesses for each instrument
+        """
+        processes = []
+        for instrument in self.subscription_manager.futures:
+            p = Process(target=self.produce_single_inst_market_data, args=('futures', instrument))
+            p.start()
+            processes.append(p)
+        for instrument in self.subscription_manager.stocks:
+            p = Process(target=self.produce_single_inst_market_data, args=('stock', instrument))
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
 
 
-    # def produce_market_data(self, marketData_2_exchSim_q, marketData_2_platform_q):
-    #     for i in range(10):
-    #         self.produce_quote(marketData_2_exchSim_q, marketData_2_platform_q)
-    #         time.sleep(5)
-
-    # def produce_quote(self, marketData_2_exchSim_q, marketData_2_platform_q):
-    #     bidPrice, askPrice, bidSize, askSize = [], [], [], []
-    #     bidPrice1 = 20+random.randint(0,100)/100
-    #     askPrice1 = bidPrice1 + 0.01
-    #     for i in range(5):
-    #         bidPrice.append(bidPrice1-i*0.01)
-    #         askPrice.append(askPrice1+i*0.01)
-    #         bidSize.append(100+random.randint(0,100)*100)
-    #         askSize.append(100+random.randint(0,100)*100)
-    #     quoteSnapshot = OrderBookSnapshot_FiveLevels('testTicker', '20230706', time.asctime(time.localtime(time.time())), 
-    #                                                  bidPrice, askPrice, bidSize, askSize)
-    #     print('[%d]MarketDataService>>>produce_quote' % (os.getpid()))
-    #     print(quoteSnapshot.outputAsDataFrame())
-    #     marketData_2_exchSim_q.put(quoteSnapshot)
-    #     marketData_2_platform_q.put(quoteSnapshot)
-
-
-# To run directly for testing
 if __name__ == '__main__':
-    # create 2 place holder queues for market data
-    sample_marketData_2_exchSim_q = Queue()
-    sample_marketData_2_platform_q = Queue()
-
-
-    marketDataService = MarketDataService(sample_marketData_2_exchSim_q, sample_marketData_2_platform_q)
-    marketDataService.get_market_data_with_delay(
-    )
+    sm = SubscriptionManager(
+        futures=['QLF1', 'GLF1', 'NYF1', 'HSF1', 'HCF1', 'NEF1', 'DBF1', 'IPF1', 'NLF1', 'RLF1'],
+        stocks=['2610', '0050', '6443', '2498', '2618', '3374', '3035', '5347', '3264', '2392'])
+    DMS = MarketDataService(sm, )
