@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Exchange Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; color: #333; }
+        .container { width: 80%; margin: auto; padding: 20px; }
+        h1 { text-align: center; color: #444; }
+        .card { background: white; padding: 15px; margin: 15px 0; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1); }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Financial Exchange Dashboard</h1>
+        
+        <div class="card">
+            <h2>Execution and Status</h2>
+            <pre>{{ execution_status | join('\n') }}</pre>
+        </div>
+
+        <div class="card">
+            <h2>Market Data Output</h2>
+            <pre>{{ market_data | join('\n') }}</pre>
+        </div>
+
+        <div class="card">
+            <h2>Execution Log</h2>
+            <pre>{{ execution_log | join('\n') }}</pre>
+        </div>
+
+        <div class="card">
+            <h2>Submitted Orders</h2>
+            <pre>{{ submitted_orders | join('\n') }}</pre>
+        </div>
+
+        <div class="card">
+            <h2>Position PnL Log (Total PnL)</h2>
+            <pre>{{ position_pnl | join('\n') }}</pre>
+        </div>
+    </div>
+</body>
+</html>
