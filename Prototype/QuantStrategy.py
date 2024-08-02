@@ -110,8 +110,8 @@ class HarshQuantStrategy(Strategy):
 
 
     def predict_last_px_cnn_ltsm(self,ticker,input_row, model_type='CNN'):
-        model_path = f"/Users/hssingh/mafs5360-final-project-v2/PrototypeWIP/nn_models/{ticker}_cnn_lastpx_model.h5"
-        scaler_path = f"/Users/hssingh/mafs5360-final-project-v2/PrototypeWIP/nn_models/{ticker}_scaler.joblib"
+        model_path = f"Prototype/nn_models/nn_models/{ticker}_cnn_lastpx_model.h5"
+        scaler_path = f"Prototype/nn_models/nn_models/{ticker}_scaler.joblib"
 
         loaded_model, scaler = self.load_selected_model_and_scaler(
             model_path,
